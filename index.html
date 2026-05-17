@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Spanska — träna ord och meningar</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://accounts.google.com/gsi/client" async></script>
+</head>
+<body>
+  <header class="app-header">
+    <h1 class="app-title">🇪🇸 Spanska</h1>
+    <div id="xp-display" class="xp-display"></div>
+    <button id="sync-status" class="sync-status-btn sync-idle" title="Google Drive-synk">☁️</button>
+    <nav class="app-nav">
+      <button class="nav-btn" data-route="dashboard">📚 Hem</button>
+      <button class="nav-btn" data-route="plan">📅 Plan</button>
+      <button class="nav-btn" data-route="progress">📊 Status</button>
+      <button class="nav-btn" data-route="settings">⚙️</button>
+    </nav>
+  </header>
+  <main id="view"></main>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

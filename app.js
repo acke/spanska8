@@ -1969,6 +1969,52 @@ function renderSettings(root) {
     ])
   ]));
 
+  // Export / Import
+  root.appendChild(el("h2", { style: "margin-top: 32px" }, "📦 Flytta status till ny enhet"));
+  root.appendChild(el("p", { class: "muted" }, "Använd detta om du byter dator eller går från lokal fil till GitHub Pages. Exportera på den gamla enheten, importera på den nya."));
+
+  const importInput = el("input", { type: "file", accept: ".json", style: "display:none" });
+  importInput.addEventListener("change", () => {
+    const file = importInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const imported = JSON.parse(e.target.result);
+        if (!imported.itemStats) throw new Error("Ogiltig fil");
+        Object.assign(state, imported);
+        state.lastSaved = Date.now();
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        scheduleSyncToDrive();
+        alert("✅ Status importerad! Dina framsteg är nu inladdade.");
+        render();
+      } catch (err) {
+        alert("❌ Kunde inte läsa filen. Kontrollera att det är en exporterad statusfil.");
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  root.appendChild(el("div", { class: "btn-row" }, [
+    el("button", {
+      class: "btn secondary",
+      onclick: () => {
+        const data = JSON.stringify(state, null, 2);
+        const blob = new Blob([data], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `spanska-status-${new Date().toISOString().slice(0,10)}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+    }, "⬇️ Exportera status"),
+    el("button", {
+      class: "btn secondary",
+      onclick: () => importInput.click()
+    }, "⬆️ Importera status"),
+    importInput
+  ]));
+
   // Sound setting
   root.appendChild(el("h2", { style: "margin-top: 32px" }, "🔊 Ljud"));
   const soundToggle = el("input", { type: "checkbox" });

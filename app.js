@@ -459,14 +459,21 @@ async function performInitialSync() {
       _driveFileId = file.id;
       const driveMs = new Date(file.modifiedTime).getTime();
       const localMs = state.lastSaved || 0;
-      if (driveMs > localMs + 5000) {
+      const localIsEmpty = (state.xp || 0) === 0 && Object.keys(state.itemStats || {}).length === 0;
+      const driveIsNewer = driveMs > localMs + 5000;
+      if (driveIsNewer || localIsEmpty) {
         const remote = await driveGet(
           `https://www.googleapis.com/drive/v3/files/${_driveFileId}?alt=media`
         );
-        Object.assign(state, remote);
-        state.lastSaved = driveMs;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        render();
+        const remoteHasData = (remote.xp || 0) > 0 || Object.keys(remote.itemStats || {}).length > 0;
+        if (remoteHasData || driveIsNewer) {
+          Object.assign(state, remote);
+          state.lastSaved = driveMs;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          render();
+        } else {
+          await uploadToDrive();
+        }
       } else {
         await uploadToDrive();
       }

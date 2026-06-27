@@ -1955,6 +1955,37 @@ function renderSettings(root) {
       : null
   ]));
 
+  // Drive file debug check
+  if (driveSync.connected) {
+    const debugOut = el("div", { class: "muted", style: "margin-top: 12px; font-size: 13px; white-space: pre-wrap; font-family: monospace;" });
+    root.appendChild(el("div", { class: "btn-row", style: "margin-top: 8px;" }, [
+      el("button", {
+        class: "btn ghost",
+        onclick: async () => {
+          debugOut.textContent = "Kollar Drive...";
+          try {
+            const data = await driveGet(
+              `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D'${DRIVE_FILE_NAME}'&fields=files(id%2CmodifiedTime%2Csize)`
+            );
+            const file = data.files?.[0];
+            if (!file) {
+              debugOut.textContent = "❌ Ingen fil hittad i Drive — data har aldrig laddats upp från någon enhet.";
+              return;
+            }
+            const remote = await driveGet(
+              `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`
+            );
+            const saved = new Date(file.modifiedTime).toLocaleString("sv-SE");
+            debugOut.textContent = `✅ Fil hittad i Drive\nSenast sparad: ${saved}\nXP i Drive: ${remote.xp || 0}\nAntal tränade kort: ${Object.keys(remote.itemStats || {}).length}\nLokal XP: ${state.xp || 0}\nLokal lastSaved: ${state.lastSaved ? new Date(state.lastSaved).toLocaleString("sv-SE") : "aldrig"}`;
+          } catch (e) {
+            debugOut.textContent = `❌ Fel: ${e.message}\nKontrollera att https://acke.github.io är tillagt som tillåtet JavaScript-ursprung i Google Cloud Console.`;
+          }
+        }
+      }, "🔍 Kontrollera Drive-fil")
+    ]));
+    root.appendChild(debugOut);
+  }
+
   // Setup instructions
   root.appendChild(el("div", { class: "card", style: "margin-top: 24px" }, [
     el("h3", {}, "Hur skapar jag ett Client ID?"),

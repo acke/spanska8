@@ -663,7 +663,8 @@ function renderDashboard(root) {
     }, [
       el("div", { class: "area-card-title" }, [
         el("span", { class: "icon" }, area.icon),
-        el("span", {}, area.name)
+        el("span", {}, area.name),
+        area.isNew ? el("span", { class: "new-badge" }, "Ny!") : null
       ]),
       el("div", { class: "muted" }, area.description),
       el("div", { class: "progress" }, [

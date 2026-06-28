@@ -851,6 +851,35 @@ function renderProgress(root) {
     root.appendChild(card);
   }
 
+  // XP and level system
+  const lvl = getLevel(state.xp);
+  root.appendChild(el("h2", { style: "margin-top: 32px" }, "⭐ XP- och nivåsystem"));
+  root.appendChild(el("div", { class: "card" }, [
+    el("p", { class: "muted", style: "margin-top: 0" }, "Så här tjänar du XP:"),
+    el("ul", { class: "muted", style: "margin: 0 0 16px; padding-left: 20px; line-height: 2" }, [
+      el("li", {}, "+5 XP för rätt ord på första försöket (+8 för meningar)"),
+      el("li", {}, "+12 XP för rätt byggd mening på första försöket"),
+      el("li", {}, "+2 XP för rätt efter ett fel"),
+      el("li", {}, "+25–35 XP bonus när en hel övning klaras"),
+      el("li", {}, "+50 XP bonus när alla övningar i ett område är klara")
+    ]),
+    el("table", { class: "simple" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "Nivå"),
+        el("th", {}, "Krav (XP)"),
+        el("th", {}, "Namn")
+      ])),
+      el("tbody", {}, LEVELS.map((lv, i) => {
+        const isCurrent = i === lvl.level - 1;
+        return el("tr", { style: isCurrent ? "font-weight: bold; background: #fff8e1;" : "" }, [
+          el("td", {}, String(i + 1) + (isCurrent ? " ◀" : "")),
+          el("td", {}, String(lv.xp)),
+          el("td", {}, lv.name)
+        ]);
+      }))
+    ])
+  ]));
+
   root.appendChild(el("div", { class: "card", style: "margin-top: 32px" }, [
     el("h3", {}, "Nollställ"),
     el("p", { class: "muted" }, "Vill du börja om från början?"),

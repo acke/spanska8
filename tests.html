@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Spanska — tests</title>
+  <style>
+    body { font-family: monospace; padding: 24px; background: #f8f7f4; max-width: 800px; margin: 0 auto; }
+    h1 { font-size: 20px; margin-bottom: 24px; }
+    .suite { margin: 16px 0; }
+    .suite-name { font-weight: bold; font-size: 14px; margin-bottom: 4px; }
+    .test { padding: 3px 10px; margin: 2px 0; border-radius: 4px; font-size: 12px; }
+    .pass { background: #d4edda; color: #155724; }
+    .fail { background: #f8d7da; color: #721c24; }
+    .summary { margin-top: 32px; font-size: 15px; font-weight: bold; padding: 12px 16px; border-radius: 6px; }
+    .pass-summary { background: #d4edda; color: #155724; }
+    .fail-summary { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <h1>🧪 Spanska — tests</h1>
+  <div id="results"></div>
+
+  <script src="data.js"></script>
+  <script>
+    // ---- Inline copies of pure functions from app.js ----
+
+    const LEVELS = [
+      { xp: 0,    name: "Hola" },
+      { xp: 100,  name: "Tiempo presente" },
+      { xp: 250,  name: "Tiempo pasado" },
+      { xp: 500,  name: "Tiempo futuro" },
+      { xp: 850,  name: "Conversador" },
+      { xp: 1300, name: "Viajero" },
+      { xp: 1900, name: "Estudiante" },
+      { xp: 2700, name: "Experto" },
+      { xp: 3700, name: "Maestro" },
+      { xp: 5000, name: "¡Olé!" }
+    ];
+
+    function getLevel(xp) {
+      let i = 0;
+      for (let k = LEVELS.length - 1; k >= 0; k--) {
+        if (xp >= LEVELS[k].xp) { i = k; break; }
+      }
+      return {
+        level: i + 1,
+        name: LEVELS[i].name,
+        minXp: LEVELS[i].xp,
+        nextXp: LEVELS[i + 1] ? LEVELS[i + 1].xp : null,
+        nextName: LEVELS[i + 1] ? LEVELS[i + 1].name : null
+      };
+    }
+
+    function itemKey(areaId, type, index) { return `${areaId}|${type}|${index}`; }
+
+    function stageKey(areaId, type, dir, mode) {
+      if (!mode || mode === "mc") return `${areaId}|${type}|${dir}`;
+      return `${areaId}|${type}|${dir}|${mode}`;
+    }
+
+    function shuffle(arr) {
+      const a = arr.slice();
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    }
+
+    function difficultyScore(stats) {
+      if (!stats) return 0;
+      const wrong = stats.wrong || 0;
+      const correct = stats.correct || 0;
+      if (wrong + correct === 0) return 0;
+      return wrong / (wrong + correct + 1);
+    }
+
+    const SRS_FIRST = { hard: 5, ok: 1440, easy: 4320 };
+
+    function applySrsRating(stats, rating) {
+      const st = Object.assign({ correct: 0, wrong: 0 }, stats);
+      const reviews = st.srsReviews || 0;
+      const prevInterval = st.srsInterval || 0;
+      let next;
+      if (reviews === 0 || !prevInterval) {
+        next = SRS_FIRST[rating];
+      } else {
+        if (rating === "hard") next = Math.max(5, Math.floor(prevInterval / 2));
+        else if (rating === "ok") next = prevInterval * 2;
+        else next = prevInterval * 3;
+      }
+      st.srsInterval = next;
+      st.srsReviews = reviews + 1;
+      st.srsLastRating = rating;
+      return st;
+    }
+
+    // ---- Test runner ----
+    let passes = 0, fails = 0;
+    const suites = [];
+    let currentSuite = null;
+
+    function suite(name, fn) {
+      currentSuite = { name, tests: [] };
+      suites.push(currentSuite);
+      fn();
+    }
+
+    function test(name, fn) {
+      try {
+        fn();
+        currentSuite.tests.push({ name, pass: true });
+        passes++;
+      } catch (e) {
+        currentSuite.tests.push({ name, pass: false, error: e.message });
+        fails++;
+      }
+    }
+
+    function assert(val, msg) {
+      if (!val) throw new Error(msg || "Assertion failed");
+    }
+
+    function assertEqual(a, b, msg) {
+      if (a !== b) throw new Error(msg || `Expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
+    }
+
+    // ---- Tests ----
+
+    suite("getLevel()", () => {
+      test("xp 0 → level 1, Hola", () => {
+        const l = getLevel(0);
+        assertEqual(l.level, 1);
+        assertEqual(l.name, "Hola");
+      });
+      test("xp 99 → level 1 (just below threshold)", () => {
+        assertEqual(getLevel(99).level, 1);
+      });
+      test("xp 100 → level 2, Tiempo presente", () => {
+        const l = getLevel(100);
+        assertEqual(l.level, 2);
+        assertEqual(l.name, "Tiempo presente");
+      });
+      test("xp 5000 → level 10 (max), nextXp is null", () => {
+        const l = getLevel(5000);
+        assertEqual(l.level, 10);
+        assertEqual(l.nextXp, null);
+      });
+      test("xp 9999 → level 10 (above max)", () => {
+        assertEqual(getLevel(9999).level, 10);
+      });
+      test("nextXp is correct for level 1", () => {
+        assertEqual(getLevel(0).nextXp, 100);
+      });
+      test("minXp matches threshold for each level", () => {
+        assertEqual(getLevel(250).minXp, 250);
+        assertEqual(getLevel(500).minXp, 500);
+      });
+    });
+
+    suite("itemKey()", () => {
+      test("format is areaId|type|index", () => {
+        assertEqual(itemKey("fragor", "words", 0), "fragor|words|0");
+      });
+      test("different index produces different key", () => {
+        assert(itemKey("fragor", "words", 0) !== itemKey("fragor", "words", 1));
+      });
+      test("different type produces different key", () => {
+        assert(itemKey("vader", "words", 0) !== itemKey("vader", "sentences", 0));
+      });
+    });
+
+    suite("stageKey()", () => {
+      test("no mode → 3-part key", () => {
+        assertEqual(stageKey("vader", "words", "es-sv"), "vader|words|es-sv");
+      });
+      test("mode mc → 3-part key (mc is default)", () => {
+        assertEqual(stageKey("vader", "words", "es-sv", "mc"), "vader|words|es-sv");
+      });
+      test("mode build → 4-part key", () => {
+        assertEqual(stageKey("vader", "sentences", "sv-es", "build"), "vader|sentences|sv-es|build");
+      });
+      test("different directions produce different keys", () => {
+        assert(stageKey("vader", "words", "es-sv") !== stageKey("vader", "words", "sv-es"));
+      });
+    });
+
+    suite("shuffle()", () => {
+      test("returns same length", () => {
+        assertEqual(shuffle([1, 2, 3, 4, 5]).length, 5);
+      });
+      test("does not mutate the original array", () => {
+        const a = [1, 2, 3];
+        shuffle(a);
+        assertEqual(a.join(","), "1,2,3");
+      });
+      test("contains the same elements", () => {
+        const a = [1, 2, 3, 4, 5];
+        const s = shuffle(a);
+        assert(a.every(x => s.includes(x)), "element missing after shuffle");
+      });
+      test("empty array → empty array", () => {
+        assertEqual(shuffle([]).length, 0);
+      });
+    });
+
+    suite("difficultyScore()", () => {
+      test("null → 0", () => assertEqual(difficultyScore(null), 0));
+      test("no attempts → 0", () => assertEqual(difficultyScore({ correct: 0, wrong: 0 }), 0));
+      test("all correct → 0", () => assertEqual(difficultyScore({ correct: 10, wrong: 0 }), 0));
+      test("all wrong → close to 1", () => {
+        assert(difficultyScore({ correct: 0, wrong: 10 }) > 0.8);
+      });
+      test("mixed → between 0 and 1", () => {
+        const s = difficultyScore({ correct: 3, wrong: 3 });
+        assert(s > 0 && s < 1);
+      });
+      test("more wrong → higher score than more correct", () => {
+        const hard = difficultyScore({ correct: 1, wrong: 9 });
+        const easy = difficultyScore({ correct: 9, wrong: 1 });
+        assert(hard > easy);
+      });
+    });
+
+    suite("applySrsRating()", () => {
+      test("first hard → 5 min interval", () => {
+        assertEqual(applySrsRating({}, "hard").srsInterval, 5);
+      });
+      test("first ok → 1440 min (1 day)", () => {
+        assertEqual(applySrsRating({}, "ok").srsInterval, 1440);
+      });
+      test("first easy → 4320 min (3 days)", () => {
+        assertEqual(applySrsRating({}, "easy").srsInterval, 4320);
+      });
+      test("second ok doubles the interval", () => {
+        const first = applySrsRating({}, "ok");         // 1440
+        assertEqual(applySrsRating(first, "ok").srsInterval, 2880);
+      });
+      test("easy triples the interval", () => {
+        const first = applySrsRating({}, "ok");         // 1440
+        assertEqual(applySrsRating(first, "easy").srsInterval, 4320);
+      });
+      test("hard halves the interval", () => {
+        const first = applySrsRating({}, "ok");         // 1440
+        assertEqual(applySrsRating(first, "hard").srsInterval, 720);
+      });
+      test("hard from tiny interval clamps to minimum 5", () => {
+        const first = applySrsRating({}, "hard");       // 5
+        assertEqual(applySrsRating(first, "hard").srsInterval, 5);
+      });
+      test("review count increments", () => {
+        const s1 = applySrsRating({}, "ok");
+        assertEqual(s1.srsReviews, 1);
+        assertEqual(applySrsRating(s1, "ok").srsReviews, 2);
+      });
+      test("srsLastRating is saved", () => {
+        assertEqual(applySrsRating({}, "easy").srsLastRating, "easy");
+      });
+    });
+
+    suite("DATA — structure", () => {
+      test("DATA.areas is a non-empty array", () => {
+        assert(Array.isArray(DATA.areas) && DATA.areas.length > 0);
+      });
+      test("no duplicate area IDs", () => {
+        const ids = DATA.areas.map(a => a.id);
+        const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+        assert(dupes.length === 0, `Duplicate IDs: ${dupes.join(", ")}`);
+      });
+      test("all isNew flags are boolean", () => {
+        for (const area of DATA.areas) {
+          if (area.isNew !== undefined) {
+            assert(typeof area.isNew === "boolean", `${area.id}: isNew is not a boolean`);
+          }
+        }
+      });
+
+      for (const area of DATA.areas) {
+        test(`${area.id}: has id, name, icon, description`, () => {
+          assert(typeof area.id === "string" && area.id.length > 0, "missing id");
+          assert(typeof area.name === "string" && area.name.length > 0, "missing name");
+          assert(typeof area.icon === "string" && area.icon.length > 0, "missing icon");
+          assert(typeof area.description === "string" && area.description.length > 0, "missing description");
+        });
+        test(`${area.id}: has words or sentences`, () => {
+          const hasWords = Array.isArray(area.words) && area.words.length > 0;
+          const hasSentences = Array.isArray(area.sentences) && area.sentences.length > 0;
+          assert(hasWords || hasSentences, "neither words nor sentences");
+        });
+        if (area.words) {
+          test(`${area.id}: all words have es and sv`, () => {
+            for (const [i, w] of area.words.entries()) {
+              assert(typeof w.es === "string" && w.es.length > 0, `word[${i}] missing es`);
+              assert(typeof w.sv === "string" && w.sv.length > 0, `word[${i}] missing sv`);
+            }
+          });
+        }
+        if (area.sentences) {
+          test(`${area.id}: all sentences have es and sv`, () => {
+            for (const [i, s] of area.sentences.entries()) {
+              assert(typeof s.es === "string" && s.es.length > 0, `sentence[${i}] missing es`);
+              assert(typeof s.sv === "string" && s.sv.length > 0, `sentence[${i}] missing sv`);
+            }
+          });
+        }
+      }
+    });
+
+    // ---- Render results ----
+    const root = document.getElementById("results");
+    for (const s of suites) {
+      const sPass = s.tests.filter(t => t.pass).length;
+      const div = document.createElement("div");
+      div.className = "suite";
+      const title = document.createElement("div");
+      title.className = "suite-name";
+      title.textContent = `${sPass === s.tests.length ? "✅" : "❌"} ${s.name} (${sPass}/${s.tests.length})`;
+      div.appendChild(title);
+      for (const t of s.tests) {
+        const row = document.createElement("div");
+        row.className = "test " + (t.pass ? "pass" : "fail");
+        row.textContent = (t.pass ? "✓ " : "✗ ") + t.name + (t.error ? " — " + t.error : "");
+        div.appendChild(row);
+      }
+      root.appendChild(div);
+    }
+
+    const summary = document.createElement("div");
+    summary.className = "summary " + (fails === 0 ? "pass-summary" : "fail-summary");
+    summary.textContent = `${passes + fails} tests — ${passes} passed, ${fails} failed`;
+    root.appendChild(summary);
+  </script>
+</body>
+</html>

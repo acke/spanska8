@@ -95,6 +95,94 @@
       return st;
     }
 
+    function defaultState() {
+      return {
+        startDate: new Date().toISOString().slice(0, 10),
+        itemStats: {},
+        stageCompletion: {},
+        xp: 0,
+        soundEnabled: true,
+        lastSaved: 0
+      };
+    }
+
+    function mergeItemStats(a, b) {
+      const x = a || {}, y = b || {};
+      const out = {};
+      for (const key of new Set(Object.keys(x).concat(Object.keys(y)))) {
+        const p = x[key], q = y[key];
+        if (!p || !q) { out[key] = p || q; continue; }
+        const fresh = (q.lastAnswered || 0) >= (p.lastAnswered || 0) ? q : p;
+        const stale = fresh === q ? p : q;
+        const pick = (f) => fresh[f] !== undefined ? fresh[f] : stale[f];
+        out[key] = Object.assign({}, p, q, {
+          correct: Math.max(p.correct || 0, q.correct || 0),
+          wrong: Math.max(p.wrong || 0, q.wrong || 0),
+          lastAnswered: Math.max(p.lastAnswered || 0, q.lastAnswered || 0),
+          srsReviews: Math.max(p.srsReviews || 0, q.srsReviews || 0),
+          srsInterval: pick("srsInterval"),
+          srsDueAt: pick("srsDueAt"),
+          srsLastRating: pick("srsLastRating")
+        });
+      }
+      return out;
+    }
+
+    function mergeStageCompletion(a, b) {
+      const x = a || {}, y = b || {};
+      const out = {};
+      for (const key of new Set(Object.keys(x).concat(Object.keys(y)))) {
+        const p = x[key], q = y[key];
+        if (!p || !q) { out[key] = p || q; continue; }
+        out[key] = {
+          lastCompleted: Math.max(p.lastCompleted || 0, q.lastCompleted || 0),
+          runs: Math.max(p.runs || 0, q.runs || 0)
+        };
+      }
+      return out;
+    }
+
+    function mergeStates(a, b) {
+      if (!a || typeof a !== "object") return Object.assign(defaultState(), b || {});
+      if (!b || typeof b !== "object") return Object.assign(defaultState(), a);
+      const out = Object.assign(defaultState(), a, b);
+      out.xp = Math.max(a.xp || 0, b.xp || 0);
+      out.lastSaved = Math.max(a.lastSaved || 0, b.lastSaved || 0);
+      out.itemStats = mergeItemStats(a.itemStats, b.itemStats);
+      out.stageCompletion = mergeStageCompletion(a.stageCompletion, b.stageCompletion);
+      const dates = [a.startDate, b.startDate].filter(Boolean).sort();
+      if (dates.length) out.startDate = dates[0];
+      const newer = (b.lastSaved || 0) >= (a.lastSaved || 0) ? b : a;
+      if (newer.soundEnabled !== undefined) out.soundEnabled = newer.soundEnabled;
+      return out;
+    }
+
+    function stateSize(s) {
+      return { xp: (s && s.xp) || 0, cards: Object.keys((s && s.itemStats) || {}).length };
+    }
+
+    function pickBestState(candidates) {
+      const valid = (candidates || []).filter(s => s && typeof s === "object");
+      if (!valid.length) return null;
+      return valid.reduce((best, s) => {
+        const a = stateSize(best), b = stateSize(s);
+        if (b.xp !== a.xp) return b.xp > a.xp ? s : best;
+        if (b.cards !== a.cards) return b.cards > a.cards ? s : best;
+        return (s.lastSaved || 0) > (best.lastSaved || 0) ? s : best;
+      });
+    }
+
+    function mergeAllStates(candidates) {
+      const valid = (candidates || []).filter(s => s && typeof s === "object");
+      if (!valid.length) return defaultState();
+      const base = pickBestState(valid);
+      let out = Object.assign(defaultState(), base);
+      for (const s of valid) {
+        if (s !== base) out = mergeStates(out, s);
+      }
+      return out;
+    }
+
     // ---- Test runner ----
     let passes = 0, fails = 0;
     const suites = [];
@@ -255,6 +343,126 @@
       });
       test("srsLastRating is saved", () => {
         assertEqual(applySrsRating({}, "easy").srsLastRating, "easy");
+      });
+    });
+
+    suite("mergeStates() — sync must never lose progress", () => {
+      test("the regression: an old low-score save never beats a high-score one", () => {
+        // Stale device opened today (fresh lastSaved), good device synced yesterday.
+        const stale = { xp: 693, itemStats: { "a|words|0": { correct: 1, wrong: 0 } }, lastSaved: 2000 };
+        const good  = { xp: 3000, itemStats: { "a|words|0": { correct: 9, wrong: 2 } }, lastSaved: 1000 };
+        assertEqual(mergeStates(stale, good).xp, 3000);
+        assertEqual(mergeStates(good, stale).xp, 3000);
+      });
+      test("merge is symmetric on xp", () => {
+        assertEqual(mergeStates({ xp: 10 }, { xp: 40 }).xp, mergeStates({ xp: 40 }, { xp: 10 }).xp);
+      });
+      test("xp never decreases below either side", () => {
+        const m = mergeStates({ xp: 3000 }, { xp: 0 });
+        assert(m.xp >= 3000, `xp dropped to ${m.xp}`);
+      });
+      test("cards known only to one side survive", () => {
+        const m = mergeStates(
+          { itemStats: { "a|words|0": { correct: 1 } } },
+          { itemStats: { "b|words|3": { correct: 2 } } }
+        );
+        assertEqual(Object.keys(m.itemStats).length, 2);
+      });
+      test("per-card counters take the maximum", () => {
+        const m = mergeStates(
+          { itemStats: { k: { correct: 5, wrong: 1 } } },
+          { itemStats: { k: { correct: 2, wrong: 7 } } }
+        );
+        assertEqual(m.itemStats.k.correct, 5);
+        assertEqual(m.itemStats.k.wrong, 7);
+      });
+      test("SRS schedule comes from the most recently answered side", () => {
+        const m = mergeStates(
+          { itemStats: { k: { correct: 1, lastAnswered: 100, srsInterval: 5, srsDueAt: 500 } } },
+          { itemStats: { k: { correct: 1, lastAnswered: 900, srsInterval: 1440, srsDueAt: 9000 } } }
+        );
+        assertEqual(m.itemStats.k.srsInterval, 1440);
+        assertEqual(m.itemStats.k.srsDueAt, 9000);
+      });
+      test("SRS falls back to the other side when the fresher one has none", () => {
+        const m = mergeStates(
+          { itemStats: { k: { lastAnswered: 100, srsInterval: 4320 } } },
+          { itemStats: { k: { lastAnswered: 900 } } }
+        );
+        assertEqual(m.itemStats.k.srsInterval, 4320);
+      });
+      test("stage runs take the maximum, completion the latest", () => {
+        const m = mergeStates(
+          { stageCompletion: { s: { runs: 3, lastCompleted: 100 } } },
+          { stageCompletion: { s: { runs: 1, lastCompleted: 900 } } }
+        );
+        assertEqual(m.stageCompletion.s.runs, 3);
+        assertEqual(m.stageCompletion.s.lastCompleted, 900);
+      });
+      test("earliest startDate wins", () => {
+        assertEqual(mergeStates({ startDate: "2026-03-01" }, { startDate: "2026-01-15" }).startDate, "2026-01-15");
+      });
+      test("sound preference follows the most recently saved side", () => {
+        assertEqual(mergeStates({ soundEnabled: true, lastSaved: 1 }, { soundEnabled: false, lastSaved: 2 }).soundEnabled, false);
+        assertEqual(mergeStates({ soundEnabled: true, lastSaved: 5 }, { soundEnabled: false, lastSaved: 2 }).soundEnabled, true);
+      });
+      test("merging with an empty state keeps everything", () => {
+        const good = { xp: 3000, itemStats: { k: { correct: 4 } } };
+        assertEqual(mergeStates(good, defaultState()).xp, 3000);
+        assertEqual(mergeStates(defaultState(), good).xp, 3000);
+      });
+      test("merging with null/undefined is safe", () => {
+        assertEqual(mergeStates({ xp: 500 }, null).xp, 500);
+        assertEqual(mergeStates(null, { xp: 500 }).xp, 500);
+      });
+      test("merge is idempotent", () => {
+        const s = { xp: 300, itemStats: { k: { correct: 2, wrong: 1, lastAnswered: 5 } }, lastSaved: 7 };
+        const once = mergeStates(s, s);
+        const twice = mergeStates(once, s);
+        assertEqual(JSON.stringify(once.itemStats), JSON.stringify(twice.itemStats));
+        assertEqual(once.xp, twice.xp);
+      });
+    });
+
+    suite("pickBestState() / mergeAllStates()", () => {
+      test("picks the highest score", () => {
+        assertEqual(pickBestState([{ xp: 100 }, { xp: 3000 }, { xp: 693 }]).xp, 3000);
+      });
+      test("ignores how recently a lower-score save was written", () => {
+        const best = pickBestState([{ xp: 693, lastSaved: 9999 }, { xp: 3000, lastSaved: 1 }]);
+        assertEqual(best.xp, 3000);
+      });
+      test("breaks an xp tie on card count", () => {
+        const best = pickBestState([
+          { xp: 500, itemStats: { a: {} } },
+          { xp: 500, itemStats: { a: {}, b: {} } }
+        ]);
+        assertEqual(Object.keys(best.itemStats).length, 2);
+      });
+      test("breaks a full tie on lastSaved", () => {
+        const best = pickBestState([{ xp: 500, lastSaved: 1 }, { xp: 500, lastSaved: 9 }]);
+        assertEqual(best.lastSaved, 9);
+      });
+      test("empty list → null", () => assertEqual(pickBestState([]), null));
+      test("skips null entries", () => {
+        assertEqual(pickBestState([null, { xp: 42 }, undefined]).xp, 42);
+      });
+      test("mergeAllStates keeps the top score and folds in the others' cards", () => {
+        const m = mergeAllStates([
+          { xp: 693, itemStats: { local: { correct: 1 } } },
+          { xp: 3000, itemStats: { drive: { correct: 5 } } },
+          { xp: 120, itemStats: { old: { correct: 2 } } }
+        ]);
+        assertEqual(m.xp, 3000);
+        assertEqual(Object.keys(m.itemStats).sort().join(","), "drive,local,old");
+      });
+      test("mergeAllStates on an empty list → default state", () => {
+        assertEqual(mergeAllStates([]).xp, 0);
+      });
+      test("mergeAllStates with a single state returns it intact", () => {
+        const m = mergeAllStates([{ xp: 3000, itemStats: { k: { correct: 3 } } }]);
+        assertEqual(m.xp, 3000);
+        assertEqual(m.itemStats.k.correct, 3);
       });
     });
 

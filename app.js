@@ -26,6 +26,106 @@ function defaultState() {
   };
 }
 
+// ---------- State merging ----------
+// Sync must never lose progress. Instead of picking a winner by timestamp
+// (which silently throws away the loser's work), every field is merged so the
+// result is at least as good as both sides on every counter.
+
+function mergeItemStats(a, b) {
+  const x = a || {}, y = b || {};
+  const out = {};
+  for (const key of new Set(Object.keys(x).concat(Object.keys(y)))) {
+    const p = x[key], q = y[key];
+    if (!p || !q) { out[key] = p || q; continue; }
+    // Counters are monotonic, so take the highest of each. SRS scheduling is a
+    // snapshot rather than a counter — it belongs to whichever side answered
+    // this card most recently.
+    const fresh = (q.lastAnswered || 0) >= (p.lastAnswered || 0) ? q : p;
+    const stale = fresh === q ? p : q;
+    const pick = (f) => fresh[f] !== undefined ? fresh[f] : stale[f];
+    out[key] = Object.assign({}, p, q, {
+      correct: Math.max(p.correct || 0, q.correct || 0),
+      wrong: Math.max(p.wrong || 0, q.wrong || 0),
+      lastAnswered: Math.max(p.lastAnswered || 0, q.lastAnswered || 0),
+      srsReviews: Math.max(p.srsReviews || 0, q.srsReviews || 0),
+      srsInterval: pick("srsInterval"),
+      srsDueAt: pick("srsDueAt"),
+      srsLastRating: pick("srsLastRating")
+    });
+  }
+  return out;
+}
+
+function mergeStageCompletion(a, b) {
+  const x = a || {}, y = b || {};
+  const out = {};
+  for (const key of new Set(Object.keys(x).concat(Object.keys(y)))) {
+    const p = x[key], q = y[key];
+    if (!p || !q) { out[key] = p || q; continue; }
+    out[key] = {
+      lastCompleted: Math.max(p.lastCompleted || 0, q.lastCompleted || 0),
+      runs: Math.max(p.runs || 0, q.runs || 0)
+    };
+  }
+  return out;
+}
+
+function mergeStates(a, b) {
+  if (!a || typeof a !== "object") return Object.assign(defaultState(), b || {});
+  if (!b || typeof b !== "object") return Object.assign(defaultState(), a);
+
+  const out = Object.assign(defaultState(), a, b);
+  out.xp = Math.max(a.xp || 0, b.xp || 0);
+  out.lastSaved = Math.max(a.lastSaved || 0, b.lastSaved || 0);
+  out.itemStats = mergeItemStats(a.itemStats, b.itemStats);
+  out.stageCompletion = mergeStageCompletion(a.stageCompletion, b.stageCompletion);
+
+  // The plan started when it started — keep the earliest date.
+  const dates = [a.startDate, b.startDate].filter(Boolean).sort();
+  if (dates.length) out.startDate = dates[0];
+
+  // Preferences aren't progress; the most recently saved side wins.
+  const newer = (b.lastSaved || 0) >= (a.lastSaved || 0) ? b : a;
+  if (newer.soundEnabled !== undefined) out.soundEnabled = newer.soundEnabled;
+
+  return out;
+}
+
+function stateSize(s) {
+  // Rough "how much progress is in here" measure, used for recovery reporting.
+  return {
+    xp: (s && s.xp) || 0,
+    cards: Object.keys((s && s.itemStats) || {}).length
+  };
+}
+
+// When several saved versions compete, the one with the highest score is the
+// real one — a lower score always means an older or partial copy. Card count
+// then date break ties so the choice is deterministic.
+function pickBestState(candidates) {
+  const valid = (candidates || []).filter(s => s && typeof s === "object");
+  if (!valid.length) return null;
+  return valid.reduce((best, s) => {
+    const a = stateSize(best), b = stateSize(s);
+    if (b.xp !== a.xp) return b.xp > a.xp ? s : best;
+    if (b.cards !== a.cards) return b.cards > a.cards ? s : best;
+    return (s.lastSaved || 0) > (best.lastSaved || 0) ? s : best;
+  });
+}
+
+// Highest score wins, then everything the other copies know is folded in on top
+// so no individual card's history is dropped.
+function mergeAllStates(candidates) {
+  const valid = (candidates || []).filter(s => s && typeof s === "object");
+  if (!valid.length) return defaultState();
+  const base = pickBestState(valid);
+  let out = Object.assign(defaultState(), base);
+  for (const s of valid) {
+    if (s !== base) out = mergeStates(out, s);
+  }
+  return out;
+}
+
 // ---------- XP / levels ----------
 const LEVELS = [
   { xp: 0,    name: "Hola" },
@@ -382,6 +482,10 @@ let _tokenClient = null;
 let _driveToken = null;
 let _driveFileId = null;
 let _syncTimeout = null;
+let _fileListPromise = null;   // in-flight file lookup, shared by all callers
+let _initialSyncDone = false;
+let _pendingSync = false;
+let _uploadChain = Promise.resolve();
 
 function loadDriveConfig() {
   try {
@@ -435,6 +539,9 @@ function signOutDrive() {
   if (_driveToken) { try { google.accounts.oauth2.revoke(_driveToken); } catch (e) {} }
   _driveToken = null;
   _driveFileId = null;
+  _fileListPromise = null;
+  _initialSyncDone = false;
+  _pendingSync = false;
   driveSync.connected = false;
   driveSync.status = "idle";
   saveDriveConfig();
@@ -447,48 +554,34 @@ async function driveGet(url) {
   return res.json();
 }
 
-async function performInitialSync() {
-  try {
-    const data = await driveGet(
+// Looking up the progress file must happen exactly once per session. Two
+// concurrent uploads that both saw a missing id used to create two competing
+// progress files in appDataFolder, after which the app read whichever one Drive
+// happened to list first and progress appeared to jump back and forth.
+function listDriveFiles() {
+  if (!_fileListPromise) {
+    _fileListPromise = driveGet(
       `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D'${DRIVE_FILE_NAME}'&fields=files(id%2CmodifiedTime)`
-    );
-    const file = data.files?.[0];
-    if (!file) {
-      await uploadToDrive();
-    } else {
-      _driveFileId = file.id;
-      const driveMs = new Date(file.modifiedTime).getTime();
-      const localMs = state.lastSaved || 0;
-      const localIsEmpty = (state.xp || 0) === 0 && Object.keys(state.itemStats || {}).length === 0;
-      const driveIsNewer = driveMs > localMs + 5000;
-      if (driveIsNewer || localIsEmpty) {
-        const remote = await driveGet(
-          `https://www.googleapis.com/drive/v3/files/${_driveFileId}?alt=media`
-        );
-        const remoteHasData = (remote.xp || 0) > 0 || Object.keys(remote.itemStats || {}).length > 0;
-        if (remoteHasData || driveIsNewer) {
-          Object.assign(state, remote);
-          state.lastSaved = driveMs;
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          render();
-        } else {
-          await uploadToDrive();
-        }
-      } else {
-        await uploadToDrive();
-      }
-    }
-    driveSync.status = "synced";
-    driveSync.lastSync = Date.now();
-  } catch (e) {
-    driveSync.status = "error";
+    ).then(data => {
+      const files = (data.files || []).slice().sort(
+        (f1, f2) => new Date(f2.modifiedTime) - new Date(f1.modifiedTime)
+      );
+      _driveFileId = files.length ? files[0].id : null;
+      return files;
+    }).catch(e => {
+      _fileListPromise = null;   // don't cache the failure
+      throw e;
+    });
   }
-  saveDriveConfig();
-  renderSyncStatus();
+  return _fileListPromise;
 }
 
-async function uploadToDrive() {
-  const body = JSON.stringify(state);
+function readDriveFile(id) {
+  return driveGet(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
+}
+
+async function writeDriveFile(data) {
+  const body = JSON.stringify(data);
   if (!_driveFileId) {
     const form = new FormData();
     form.append("metadata", new Blob([JSON.stringify({ name: DRIVE_FILE_NAME, parents: ["appDataFolder"] })], { type: "application/json" }));
@@ -497,32 +590,143 @@ async function uploadToDrive() {
       "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
       { method: "POST", headers: { Authorization: `Bearer ${_driveToken}` }, body: form }
     );
-    const data = await res.json();
-    _driveFileId = data.id;
+    if (!res.ok) throw new Error(res.status);
+    const created = await res.json();
+    _driveFileId = created.id;
   } else {
-    await fetch(
+    const res = await fetch(
       `https://www.googleapis.com/upload/drive/v3/files/${_driveFileId}?uploadType=media`,
       { method: "PATCH", headers: { Authorization: `Bearer ${_driveToken}`, "Content-Type": "application/json" }, body }
     );
+    if (!res.ok) throw new Error(res.status);
   }
+}
+
+// Adopt a merged state locally. A full re-render mid-quiz would throw away the
+// questions the user is in the middle of answering, and on the settings page it
+// would wipe whatever the sync tools just printed — so those only get the header.
+function adoptState(merged) {
+  const changed = JSON.stringify(state) !== JSON.stringify(merged);
+  Object.assign(state, merged);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (!changed) return;
+  const route = parseRoute().name;
+  if (route === "quiz" || route === "build" || route === "settings") renderXpDisplay();
+  else render();
+}
+
+async function performInitialSync() {
+  try {
+    _fileListPromise = null;               // always start from a fresh listing
+    const files = await listDriveFiles();
+    // Read *every* matching file, not just the newest: an earlier version of
+    // this app could leave duplicates behind, each holding part of the truth.
+    // The highest-scoring one becomes the base.
+    const candidates = [state];
+    let canonical = null;
+    for (const f of files) {
+      try {
+        const remote = await readDriveFile(f.id);
+        if (f.id === _driveFileId) canonical = remote;
+        candidates.push(remote);
+      } catch (e) { /* unreadable file — keep what we have */ }
+    }
+    const merged = mergeAllStates(candidates);
+    adoptState(merged);
+    // Only write when we'd actually change something. Writing on every load
+    // burns a Drive revision each time and pushes the real history out of reach.
+    if (!canonical || JSON.stringify(canonical) !== JSON.stringify(merged)) {
+      await writeDriveFile(merged);
+    }
+    driveSync.status = "synced";
+    driveSync.lastSync = Date.now();
+    _initialSyncDone = true;
+    if (_pendingSync) { _pendingSync = false; scheduleSyncToDrive(); }
+  } catch (e) {
+    driveSync.status = "error";
+  }
+  saveDriveConfig();
+  renderSyncStatus();
+}
+
+// Read-modify-write. A plain overwrite lets a tab that has been open since
+// before another device synced erase everything that device added.
+async function syncUp() {
+  await listDriveFiles();
+  let merged = state;
+  if (_driveFileId) {
+    try {
+      merged = mergeStates(state, await readDriveFile(_driveFileId));
+    } catch (e) { /* remote unreadable — write what we have rather than nothing */ }
+  }
+  adoptState(merged);
+  await writeDriveFile(merged);
 }
 
 function scheduleSyncToDrive() {
   if (!_driveToken) return;
+  // Uploading before the first download would push this device's state over
+  // Drive's — exactly the overwrite we're avoiding. Wait for the merge.
+  if (!_initialSyncDone) { _pendingSync = true; return; }
   clearTimeout(_syncTimeout);
-  _syncTimeout = setTimeout(async () => {
+  _syncTimeout = setTimeout(() => {
     driveSync.status = "syncing";
     renderSyncStatus();
-    try {
-      await uploadToDrive();
-      driveSync.status = "synced";
-      driveSync.lastSync = Date.now();
-    } catch (e) {
-      driveSync.status = "error";
-    }
-    saveDriveConfig();
-    renderSyncStatus();
+    _uploadChain = _uploadChain.then(async () => {
+      try {
+        await syncUp();
+        driveSync.status = "synced";
+        driveSync.lastSync = Date.now();
+      } catch (e) {
+        driveSync.status = "error";
+      }
+      saveDriveConfig();
+      renderSyncStatus();
+    });
   }, 2000);
+}
+
+// ---------- Recovery ----------
+// Drive keeps old revisions of a file for a while. If a previous version of the
+// app already overwrote good progress, the higher-scoring version is very often
+// still sitting in the revision history — this pulls all of it back and merges.
+async function recoverFromDriveHistory(onProgress) {
+  _fileListPromise = null;
+  const files = await listDriveFiles();
+  const candidates = [state];
+  let versions = 0;
+
+  for (const f of files) {
+    const candidates = [{ url: `https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, label: "aktuell" }];
+    try {
+      const revs = await driveGet(
+        `https://www.googleapis.com/drive/v3/files/${f.id}/revisions?fields=revisions(id%2CmodifiedTime)`
+      );
+      for (const r of (revs.revisions || [])) {
+        candidates.push({
+          url: `https://www.googleapis.com/drive/v3/files/${f.id}/revisions/${r.id}?alt=media`,
+          label: new Date(r.modifiedTime).toLocaleString("sv-SE")
+        });
+      }
+    } catch (e) { /* revision history unavailable — the current file still counts */ }
+
+    for (const c of candidates) {
+      try {
+        const data = await driveGet(c.url);
+        if (!data || typeof data !== "object" || !data.itemStats) continue;
+        versions++;
+        candidates.push(data);
+        const size = stateSize(data);
+        if (onProgress) onProgress(`Läste version ${c.label}: ${size.xp} XP, ${size.cards} kort`);
+      } catch (e) { /* skip */ }
+    }
+  }
+
+  const best = pickBestState(candidates);
+  const merged = mergeAllStates(candidates);
+  adoptState(merged);
+  if (_driveToken) await writeDriveFile(merged);
+  return { versions, best: stateSize(best), result: stateSize(merged) };
 }
 
 function renderSyncStatus() {
@@ -2003,22 +2207,55 @@ function renderSettings(root) {
             const data = await driveGet(
               `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D'${DRIVE_FILE_NAME}'&fields=files(id%2CmodifiedTime%2Csize)`
             );
-            const file = data.files?.[0];
-            if (!file) {
+            const files = data.files || [];
+            if (!files.length) {
               debugOut.textContent = "❌ Ingen fil hittad i Drive — data har aldrig laddats upp från någon enhet.";
               return;
             }
-            const remote = await driveGet(
-              `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`
-            );
-            const saved = new Date(file.modifiedTime).toLocaleString("sv-SE");
-            debugOut.textContent = `✅ Fil hittad i Drive\nSenast sparad: ${saved}\nXP i Drive: ${remote.xp || 0}\nAntal tränade kort: ${Object.keys(remote.itemStats || {}).length}\nLokal XP: ${state.xp || 0}\nLokal lastSaved: ${state.lastSaved ? new Date(state.lastSaved).toLocaleString("sv-SE") : "aldrig"}`;
+            // List every matching file, not just the first — duplicates are
+            // exactly the thing worth spotting here.
+            const lines = [`✅ ${files.length} fil(er) hittade i Drive`];
+            for (const f of files) {
+              const remote = await driveGet(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`);
+              lines.push(
+                `• Sparad ${new Date(f.modifiedTime).toLocaleString("sv-SE")} — ` +
+                `${remote.xp || 0} XP, ${Object.keys(remote.itemStats || {}).length} kort`
+              );
+            }
+            lines.push(`Lokal XP: ${state.xp || 0}`);
+            lines.push(`Lokal lastSaved: ${state.lastSaved ? new Date(state.lastSaved).toLocaleString("sv-SE") : "aldrig"}`);
+            debugOut.textContent = lines.join("\n");
           } catch (e) {
             debugOut.textContent = `❌ Fel: ${e.message}\nKontrollera att https://acke.github.io är tillagt som tillåtet JavaScript-ursprung i Google Cloud Console.`;
           }
         }
-      }, "🔍 Kontrollera Drive-fil")
+      }, "🔍 Kontrollera Drive-fil"),
+      el("button", {
+        class: "btn secondary",
+        onclick: async (ev) => {
+          const btn = ev.currentTarget;
+          btn.disabled = true;
+          const lines = ["Söker igenom alla versioner i Drive..."];
+          debugOut.textContent = lines.join("\n");
+          try {
+            const r = await recoverFromDriveHistory((msg) => {
+              lines.push(msg);
+              debugOut.textContent = lines.join("\n");
+            });
+            debugOut.textContent =
+              `✅ Genomsökte ${r.versions} version(er).\n` +
+              `Bästa hittade: ${r.best.xp} XP, ${r.best.cards} kort\n` +
+              `Din status nu: ${r.result.xp} XP, ${r.result.cards} kort`;
+          } catch (e) {
+            debugOut.textContent = `❌ Kunde inte läsa historiken: ${e.message}`;
+          } finally {
+            btn.disabled = false;
+          }
+        }
+      }, "🛟 Återställ högsta poäng")
     ]));
+    root.appendChild(el("p", { class: "muted", style: "font-size: 13px;" },
+      "\"Återställ högsta poäng\" letar igenom alla sparade versioner i Drive (även äldre) och tar tillbaka den med högst poäng."));
     root.appendChild(debugOut);
   }
 
@@ -2098,6 +2335,12 @@ function renderSettings(root) {
 }
 
 // ---------- Init ----------
-saveState();
+// Deliberately NOT saveState() here: that stamped lastSaved = now on every page
+// load, which made this device look newer than Drive no matter how old its data
+// was, so the sync uploaded stale progress over good progress. Persist the
+// defaults for a first-time visitor without touching lastSaved.
+if (!localStorage.getItem(STORAGE_KEY)) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
 initDriveSync();
 render();
